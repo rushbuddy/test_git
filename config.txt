@@ -1,3 +1,4 @@
 setting1=value1
 setting2=value2
 setting3=value3
+port=8080
