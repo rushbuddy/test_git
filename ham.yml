@@ -1,0 +1,133 @@
+- name: AIX Linux Prechecks Playbook
+  hosts: "{{ IP_LIST |lower}}"
+  ignore_errors: true
+  gather_facts: false
+  become: true
+  tasks: 
+    - name: os gather for prechecks
+      shell: uname
+      register: os
+
+    - name: Run Linux Precheck
+      shell: |    
+            >/tmp/LINUX_Ansible_prechecks.csv
+            # Fetch Data
+            IP={{ hostvars[inventory_hostname]['ansible_host'] }}
+            hst1={{ inventory_hostname }}
+            hst2=$(uname -n)
+            os=$(uname)
+            SERIAL=$(dmidecode -s system-serial-number 2>/dev/null | tr -d '[:space:]')
+            UPTIME=$(uptime |awk -p '{print $3}' |sed s'/,//g')
+            os_version=$(grep -oP '\d+\.\d+' /etc/redhat-release)
+            KERNEL=$(uname -r)           
+            
+            # Get GPFS version
+            GPFS_STATUS=""
+            gpfs_v=$(rpm -qa | grep -i gpfs.base 2>/dev/null)
+            if [[ -n "$gpfs_v" ]]; then
+                gpfs+="$gpfs_v"
+            fi
+            
+            # Get GPFS status (Active/Down/etc.)
+            gpfs_status=$(/usr/lpp/mmfs/bin/mmgetstate 2>/dev/null | tail -1 | awk '{print $3}')
+            if [[ -n "$gpfs_status" ]]; then
+                gpfs+=" $gpfs_status"
+            fi
+            
+            # Final Output
+            GPFS_STATUS=$gpfs
+            
+            
+            # Initialize variable
+            PCS_STATUS=""
+            
+            # Check if /sbin/pcs exists
+            if [[ -x "/sbin/pcs" ]]; then
+                pcs_s+="PCS_file_set_present"
+            
+                # Check pcs status (look for 'pcsd' line)
+                pcs_status_output=$(/sbin/pcs status 2>/dev/null | grep -i pcsd)
+            
+                if [[ -n "$pcs_status_output" ]]; then
+                    pcs_s+=" $pcs_status_output"
+                fi
+            else
+                pcs_s+="none"
+            fi
+            
+            # Final output
+            PCS_STATUS=$pcs_s
+            ###########
+            HA_SECONDARY=$(pcs status |grep -iE "Online|Offline" || echo "")  
+            fence_opt=$(pcs status | grep -i fence_vmware_soap | grep -iE "Started|Stopped" | awk '{for(i=1;i<=NF;i++) if($i=="Started" || $i=="Stopped") {for(j=i;j<=NF;j++) printf $j" "; print "";}}' || echo "")
+            
+            # Check DB services          
+            subsystem=""
+            
+            [ -f /HTTPServer/IHS/bin/httpd ] && subsystem="${subsystem}|HTTPD"
+            [ -d /home/db2inst1 ] && subsystem="${subsystem}|DB2_Running"
+            [ -d /usr/mqm ] && subsystem="${subsystem}|MQM_Running"
+            [ -f /etc/oratab ] && subsystem="${subsystem}|ORACLE"
+            [ -d /websphere ] && subsystem="${subsystem}|WAS_Running"
+            [ -d /var/hadoop ] && subsystem="${subsystem}|HADOOP_Running"
+            
+            ps -ef | grep -i _pmon_ | grep -v grep >/dev/null && subsystem="${subsystem}|ORACLE_RUNNING"
+            ps -ef | grep -i http | grep -v grep >/dev/null && subsystem="${subsystem}|HTTP_RUNNING"
+            ps -ef | grep -i mysql | grep -v grep >/dev/null && subsystem="${subsystem}|MYSQL_RUNNING"
+            ps -ef | grep postgres | grep -v grep >/dev/null && subsystem="${subsystem}|POSTGRES_Running"
+            
+            subsystem="${subsystem}|"
+            
+            # Output
+            SUBSYSTEM=$subsystem
+            
+            
+            # VMware Tools
+            VMTOOLS=`/bin/vmware-toolbox-cmd -v || echo "Not Installed"`
+            
+            
+            # Kdump
+            KSTATUS=$(systemctl status kdump|grep -i Active|awk -p '{print $2}'|| echo "Not Active")
+            
+            # Backup status (using rear)
+            LOGFILE="/var/log/rear/rear-$(uname -n).log"
+            BACKUP_STATUS=""
+            if [[ -f "$LOGFILE" ]]; then
+            BACKUP_STATUS1=$(grep -i "Writing to" "$LOGFILE" | awk -F'Writing to ' '{print $2}' | head -1)
+            if [[ -n "$BACKUP_STATUS1" ]]; then
+            BACKUP_STATUS=$BACKUP_STATUS1
+            else
+            BACKUP_STATUS="Not Found"
+            fi
+            else
+            BACKUP_STATUS="Rear Backup file Not Found"
+            fi
+            #############
+            MKSYS="Linux Device Not Applicable"
+            #########
+            
+            ###########################################################################################
+            
+            # Physical or VM
+            PRODUCT=$(dmidecode -s system-product-name 2>/dev/null)
+            if [[ "$PRODUCT" == *"VMware"* || "$PRODUCT" == *"Virtual"* ]]; then
+                TYPE="VM"
+                CONSOLE_IP="Not Applicable Linux VM"
+            else
+                TYPE="Physical"
+                #CONSOLE_IP=$(ipmitool lan print | grep -i "IP Address" | awk '{print $4}' |sed 's/\\n//g' |sed 's/://g')
+                CONSOLE_IP=$(ipmitool lan print | awk -F: '/^IP Address[ ]*:/{gsub(/^[ \t]+/,"",$2); print $2}')
+            fi
+            
+            # Output CSV
+            secure_bt=`mokutil --sb-state`
+            HACMP="Linux Not Applicable"
+            yum_list_kernel=$(yum list kernel 2>&1 | sed 's/,//g')
+            phyip=`cat /etc/hosts |grep -w $(uname -n) |head -1`
+            echo -e "$IP,$hst2,$hst1,$phyip,$os,$SERIAL,$UPTIME,$os_version,$KERNEL,$GPFS_STATUS,$PCS_STATUS,$HA_SECONDARY,$fence_opt,$SUBSYSTEM,$VMTOOLS,$KSTATUS,$BACKUP_STATUS,$MKSYS,$CONSOLE_IP,$TYPE,$secure_bt,$HACMP,\"$yum_list_kernel\"\\n" > /tmp/LINUX_Ansible_prechecks.csv                 
+      async: 300
+      poll: 1
+      environment: 
+         PATH: "/sbin:/usr/sbin:/usr/bin:/bin:/usr/lpp/mmfs/bin"
+      when: os.stdout == "Linux"
+      register: lin_out
